@@ -1,5 +1,7 @@
 package eu.kanade.tachiyomi.extension.en.irovedout
 
+import android.app.Application
+import android.content.SharedPreferences
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -11,6 +13,8 @@ import eu.kanade.tachiyomi.util.asJsoup
 import okhttp3.Request
 import okhttp3.Response
 import rx.Observable
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
 import java.lang.Exception
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -32,6 +36,29 @@ class IRovedOut : HttpSource() {
     """.trimIndent()
     private val dateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale.US)
     private val titleRegex = Regex("Book (?<bookNumber>\\d+): (?<chapterTitle>.+)")
+    private val preferences by lazy {
+        Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
+    }
+    private var SharedPreferences.lastUpdatedChapter
+        get() = getFloat(PREF_LAST_UPDATED_CHAPTER, PREF_LAST_UPDATED_CHAPTER_DEFAULT)
+        set(value) = edit().putFloat(PREF_LAST_UPDATED_CHAPTER, value).apply()
+
+    private var SharedPreferences.lastUpdatedChapterPages
+        get() = getInt(PREF_LAST_UPDATED_CHAPTER_PAGES, PREF_LAST_UPDATED_CHAPTER_PAGES_DEFAULT)
+        set(value) = edit().putInt(PREF_LAST_UPDATED_CHAPTER_PAGES, value).apply()
+
+    private fun getChapterPages(chapter: SChapter): List<Page> {
+        val match = titleRegex.matchEntire(chapter.name) ?: return listOf()
+        val bookNumber = match.groups["bookNumber"]!!.value.toInt()
+        val title = match.groups["chapterTitle"]!!.value
+        val bookPage = client.newCall(GET(archiveUrl + if (bookNumber != 1) "-book-$bookNumber" else "", headers)).execute().asJsoup()
+        val chapterWrap = bookPage.select(".comic-archive-chapter-wrap").find { it.selectFirst(".comic-archive-chapter")!!.text() == title }
+        val pageUrls = chapterWrap?.select(".comic-archive-list-wrap .comic-archive-title > a")?.map { it.attr("href") } ?: return listOf()
+        val pages = pageUrls.mapIndexed { pageIndex, pageUrl ->
+            Page(pageIndex, pageUrl)
+        }
+        return pages
+    }
 
     override fun chapterListRequest(manga: SManga): Request = throw Exception("Not used")
 
@@ -48,13 +75,26 @@ class IRovedOut : HttpSource() {
             val bookPage = client.newCall(GET(bookUrl, headers)).execute().asJsoup()
             val chapters = bookPage.select(".comic-archive-chapter-wrap")
             chapters.map {
-                val chapterWrap = it.selectFirst(".comic-archive-chapter-wrap")!!
-                SChapter.create().apply {
+                val chapterWrap = it.selectFirst(".comic-archive-chapter-wrap")
+                val timestamp = dateFormat.parse(chapterWrap.select(".comic-archive-date").last()!!.text())?.time ?: 0L
+                val chapter = SChapter.create().apply {
                     name = "Book $bookNumber: ${chapterWrap.selectFirst(".comic-archive-chapter")!!.text()}"
                     url = chapterWrap.selectFirst(".comic-archive-title > a")!!.attr("href")
-                    date_upload = dateFormat.parse(chapterWrap.select(".comic-archive-date").last()!!.text())?.time ?: 0L
+                    date_upload = timestamp
                     chapter_number = chapterCounter++
                 }
+
+                val pageCount = getChapterPages(chapter).count()
+                val shouldUpdateChapter = chapterCounter == preferences.lastUpdatedChapter && pageCount > preferences.lastUpdatedChapterPages
+                preferences.apply {
+                    lastUpdatedChapter = chapterCounter
+                    lastUpdatedChapterPages = pageCount
+                }
+
+                if (shouldUpdateChapter) {
+                    chapter.date_upload++
+                }
+                chapter
             }
         }
         return Observable.just(chaptersByBook.flatten().reversed())
@@ -72,24 +112,11 @@ class IRovedOut : HttpSource() {
 
     override fun latestUpdatesRequest(page: Int): Request = throw Exception("Not used")
 
-    override fun fetchMangaDetails(manga: SManga): Observable<SManga> {
-        return Observable.just(manga)
-    }
+    override fun fetchMangaDetails(manga: SManga): Observable<SManga> = Observable.just(manga)
 
     override fun mangaDetailsParse(response: Response): SManga = throw Exception("Not used")
 
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
-        val match = titleRegex.matchEntire(chapter.name) ?: return Observable.just(listOf())
-        val bookNumber = match.groups["bookNumber"]!!.value.toInt()
-        val title = match.groups["chapterTitle"]!!.value
-        val bookPage = client.newCall(GET(archiveUrl + if (bookNumber != 1) "-book-$bookNumber" else "", headers)).execute().asJsoup()
-        val chapterWrap = bookPage.select(".comic-archive-chapter-wrap").find { it.selectFirst(".comic-archive-chapter")!!.text() == title }
-        val pageUrls = chapterWrap?.select(".comic-archive-list-wrap .comic-archive-title > a")?.map { it.attr("href") } ?: return Observable.just(listOf())
-        val pages = pageUrls.mapIndexed { pageIndex, pageUrl ->
-            Page(pageIndex, pageUrl)
-        }
-        return Observable.just(pages)
-    }
+    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> = Observable.just(getChapterPages(chapter))
 
     override fun pageListRequest(chapter: SChapter): Request = throw Exception("Not used")
 
@@ -97,7 +124,7 @@ class IRovedOut : HttpSource() {
 
     override fun fetchPopularManga(page: Int): Observable<MangasPage> {
         val manga = SManga.create().apply {
-            url = ""
+            url = baseUrl
             thumbnail_url = thumbnailUrl
             title = seriesTitle
             author = authorName
@@ -119,4 +146,12 @@ class IRovedOut : HttpSource() {
     override fun searchMangaParse(response: Response): MangasPage = throw Exception("Not used")
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request = throw Exception("Not used")
+
+    companion object {
+        private const val PREF_LAST_UPDATED_CHAPTER = "last_updated_chapter"
+        private const val PREF_LAST_UPDATED_CHAPTER_DEFAULT = -1F
+        private const val PREF_LAST_UPDATED_CHAPTER_PAGES = "last_updated_chapter_pages"
+        private const val PREF_LAST_UPDATED_CHAPTER_PAGES_DEFAULT = -1
+
+    }
 }
