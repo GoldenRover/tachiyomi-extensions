@@ -41,11 +41,11 @@ class IRovedOut : HttpSource() {
     }
     private var SharedPreferences.lastUpdatedChapter
         get() = getFloat(PREF_LAST_UPDATED_CHAPTER, PREF_LAST_UPDATED_CHAPTER_DEFAULT)
-        set(value) = edit().putFloat(PREF_LAST_UPDATED_CHAPTER, value).apply()
+        set(value) { edit().putFloat(PREF_LAST_UPDATED_CHAPTER, value).commit() }
 
     private var SharedPreferences.lastUpdatedChapterPages
         get() = getInt(PREF_LAST_UPDATED_CHAPTER_PAGES, PREF_LAST_UPDATED_CHAPTER_PAGES_DEFAULT)
-        set(value) = edit().putInt(PREF_LAST_UPDATED_CHAPTER_PAGES, value).apply()
+        set(value) { edit().putInt(PREF_LAST_UPDATED_CHAPTER_PAGES, value).commit() }
 
     private fun getChapterPages(chapter: SChapter): List<Page> {
         val match = titleRegex.matchEntire(chapter.name) ?: return listOf()
@@ -75,25 +75,34 @@ class IRovedOut : HttpSource() {
             val bookPage = client.newCall(GET(bookUrl, headers)).execute().asJsoup()
             val chapters = bookPage.select(".comic-archive-chapter-wrap")
             chapters.map {
-                val chapterWrap = it.selectFirst(".comic-archive-chapter-wrap")
+                val chapterWrap = it.selectFirst(".comic-archive-chapter-wrap")!!
                 val timestamp = dateFormat.parse(chapterWrap.select(".comic-archive-date").last()!!.text())?.time ?: 0L
                 val chapter = SChapter.create().apply {
                     name = "Book $bookNumber: ${chapterWrap.selectFirst(".comic-archive-chapter")!!.text()}"
-                    url = chapterWrap.selectFirst(".comic-archive-title > a")!!.attr("href")
-                    date_upload = timestamp
                     chapter_number = chapterCounter++
+                    date_upload = timestamp
+                    url = chapter_number.toString()
                 }
 
-                val pageCount = getChapterPages(chapter).count()
-                val shouldUpdateChapter = chapterCounter == preferences.lastUpdatedChapter && pageCount > preferences.lastUpdatedChapterPages
-                preferences.apply {
-                    lastUpdatedChapter = chapterCounter
-                    lastUpdatedChapterPages = pageCount
+                val isLastUpdatedChapter = chapter.chapter_number.toInt() == preferences.lastUpdatedChapter.toInt()
+                if (isLastUpdatedChapter) {
+                    chapter.chapter_number = preferences.lastUpdatedChapter
                 }
-
+                val pageCount = it.select(".comic-list").count()
+                val shouldUpdateChapter = isLastUpdatedChapter && pageCount > preferences.lastUpdatedChapterPages
                 if (shouldUpdateChapter) {
-                    chapter.date_upload++
+                    chapter.apply {
+                        chapter_number += 0.1F
+                        url = chapter_number.toString()
+                    }
                 }
+                if (chapter.chapter_number > preferences.lastUpdatedChapter || shouldUpdateChapter) {
+                    preferences.apply {
+                        lastUpdatedChapter = chapter.chapter_number
+                        lastUpdatedChapterPages = pageCount
+                    }
+                }
+
                 chapter
             }
         }
@@ -124,7 +133,7 @@ class IRovedOut : HttpSource() {
 
     override fun fetchPopularManga(page: Int): Observable<MangasPage> {
         val manga = SManga.create().apply {
-            url = baseUrl
+            url = ""
             thumbnail_url = thumbnailUrl
             title = seriesTitle
             author = authorName
@@ -152,6 +161,5 @@ class IRovedOut : HttpSource() {
         private const val PREF_LAST_UPDATED_CHAPTER_DEFAULT = -1F
         private const val PREF_LAST_UPDATED_CHAPTER_PAGES = "last_updated_chapter_pages"
         private const val PREF_LAST_UPDATED_CHAPTER_PAGES_DEFAULT = -1
-
     }
 }
